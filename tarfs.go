@@ -1,4 +1,4 @@
-// In memory http.FileSystem from tars archives
+// Package tarfs is an in memory http.FileSystem from tars archives.
 package tarfs
 
 import (
@@ -13,13 +13,13 @@ import (
 	"strings"
 )
 
-
 // New returns an http.FileSystem that holds all the files in the tar,
-// It reads the whole archive from the Reader. It is the caller's responsibility to call Close on the Reader when done.
+// It reads the whole archive from the Reader.
+// It is the caller's responsibility to call Close on the Reader when done.
 func New(tarstream io.Reader) (http.FileSystem, error) {
 	tr := tar.NewReader(tarstream)
 
-	tarfs := tarfs{make(map[string]file)}
+	tarfs := make(tarfs)
 	// Iterate through the files in the archive.
 	for {
 		hdr, err := tr.Next()
@@ -35,58 +35,66 @@ func New(tarstream io.Reader) (http.FileSystem, error) {
 			return nil, err
 		}
 
-		tarfs.files[hdr.Name] = file{data: data, fi: hdr.FileInfo()}
+		tarfs[hdr.Name] = filedata{data: data, fi: hdr.FileInfo()}
 	}
-	return &tarfs, nil
+	return tarfs, nil
+}
+
+type filedata struct {
+	data []byte
+	fi   os.FileInfo
 }
 
 type file struct {
 	*bytes.Reader
-	data []byte
-	fi   os.FileInfo
-
+	fi    os.FileInfo
 	files []os.FileInfo
 }
 
-type tarfs struct {
-	files map[string]file
-}
+type tarfs map[string]filedata
 
-func (tf *tarfs) Open(name string) (http.File, error) {
+// Open implements http.FileSystem.
+func (tf tarfs) Open(name string) (http.File, error) {
 	if filepath.Separator != '/' && strings.IndexRune(name, filepath.Separator) >= 0 ||
 		strings.Contains(name, "\x00") {
 		return nil, errors.New("http: invalid character in file path")
 	}
-	f, ok := tf.files[name]
+	fd, ok := tf[name]
 	if !ok {
 		return nil, os.ErrNotExist
 	}
+	f := file{
+		Reader: bytes.NewReader(fd.data),
+		fi:     fd.fi,
+	}
 	if f.fi.IsDir() {
-		f.files = []os.FileInfo{}
-		for path, file := range tf.files {
+		f.files = make([]os.FileInfo, 0)
+		for path, file := range tf {
 			if strings.HasPrefix(path, name) {
-				s, _ := file.Stat()
-				f.files = append(f.files, s)
+				f.files = append(f.files, file.fi)
 			}
 		}
 
 	}
-	f.Reader = bytes.NewReader(f.data)
 	return &f, nil
 }
 
-// A noop-closer.
+// Close is a noop-closer.
 func (f *file) Close() error {
 	return nil
 }
 
-func (f *file) Readdir(count int) ([]os.FileInfo, error) {
+// Readdir implements http.File.
+func (f *file) Readdir(n int) ([]os.FileInfo, error) {
+	// BUG(omeid): Does not implement the same semantics as
+	// os.File.Readdir when n>0 && n<len(f.files).
 	if f.fi.IsDir() && f.files != nil {
 		return f.files, nil
 	}
 	return nil, os.ErrNotExist
 }
 
+// Stat implements http.File.
 func (f *file) Stat() (os.FileInfo, error) {
 	return f.fi, nil
 }
